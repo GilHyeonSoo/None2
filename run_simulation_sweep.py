@@ -1,0 +1,212 @@
+import csv
+from pathlib import Path
+import time
+
+from simulation_env import SimulationConfig, UAMHandoverSimulation
+
+
+SPEED_PROFILES = {
+    "low": (120.0, 140.0, 160.0),
+    "medium": (150.0, 180.0, 210.0),
+    "high": (180.0, 215.0, 250.0),
+}
+
+ALTITUDE_PROFILES = {
+    "low": (300.0,),
+    "mid": (450.0,),
+    "high": (600.0,),
+}
+
+BS_DENSITY_PROFILES = {
+    "sparse": 5.5,
+    "dense": 3.0,
+}
+
+PHASES = ("introduction", "growth", "maturity")
+POLICIES = ("reactive", "proactive")
+SEEDS = (7, 11)
+RUN_DURATION_S = 1800.0
+TRAFFIC_HOURS = 1.0
+
+
+def _format_duration(seconds: float) -> str:
+    total_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def main() -> None:
+    run_rows = []
+    flight_rows = []
+    run_id = 0
+    total_runs = (
+        len(SEEDS)
+        * len(PHASES)
+        * len(SPEED_PROFILES)
+        * len(ALTITUDE_PROFILES)
+        * len(BS_DENSITY_PROFILES)
+        * len(POLICIES)
+    )
+    completed_runs = 0
+    sweep_started_at = time.perf_counter()
+
+    print(
+        "[SWEEP] "
+        f"starting total_runs={total_runs} "
+        f"run_duration_s={RUN_DURATION_S} traffic_hours={TRAFFIC_HOURS}",
+        flush=True,
+    )
+
+    for seed in SEEDS:
+        for phase in PHASES:
+            for speed_name, speed_range in SPEED_PROFILES.items():
+                for altitude_name, altitude_bands in ALTITUDE_PROFILES.items():
+                    for density_name, spacing_km in BS_DENSITY_PROFILES.items():
+                        for policy in POLICIES:
+                            run_started_at = time.perf_counter()
+                            progress_index = completed_runs + 1
+                            progress_pct = (progress_index / total_runs) * 100.0
+                            print(
+                                "[START] "
+                                f"{progress_index}/{total_runs} "
+                                f"({progress_pct:5.1f}%) "
+                                f"seed={seed} phase={phase} "
+                                f"speed={speed_name} altitude={altitude_name} "
+                                f"bs_density={density_name} policy={policy}",
+                                flush=True,
+                            )
+
+                            cfg = SimulationConfig(
+                                phase=phase,
+                                seed=seed,
+                                speed_range_kmh=speed_range,
+                                altitude_bands_m=altitude_bands,
+                                bs_spacing_km=spacing_km,
+                            )
+                            sim = UAMHandoverSimulation(cfg)
+                            generated = sim.spawn_reference_traffic(hours=TRAFFIC_HOURS)
+                            summary = sim.run(duration_s=RUN_DURATION_S, policy=policy)
+
+                            context = {
+                                "run_id": run_id,
+                                "seed": seed,
+                                "phase": phase,
+                                "speed_profile": speed_name,
+                                "altitude_profile": altitude_name,
+                                "bs_density_profile": density_name,
+                                "bs_spacing_km": spacing_km,
+                                "generated_flights": generated,
+                                "run_duration_s": RUN_DURATION_S,
+                            }
+                            run_rows.append({**context, **summary})
+                            flight_rows.extend(sim.collect_flight_rows(policy=policy, context=context))
+
+                            completed_runs += 1
+                            run_elapsed = time.perf_counter() - run_started_at
+                            total_elapsed = time.perf_counter() - sweep_started_at
+                            average_per_run = total_elapsed / completed_runs
+                            remaining_runs = total_runs - completed_runs
+                            eta_seconds = average_per_run * remaining_runs
+                            print(
+                                "[DONE ] "
+                                f"{completed_runs}/{total_runs} "
+                                f"elapsed={_format_duration(run_elapsed)} "
+                                f"total_elapsed={_format_duration(total_elapsed)} "
+                                f"eta={_format_duration(eta_seconds)} "
+                                f"generated_flights={generated} "
+                                f"completed_flights={summary['completed_flights']} "
+                                f"handovers={summary['total_handovers']} "
+                                f"radio_success={summary['radio_handover_successes']} "
+                                f"service_success={summary['service_continuity_successes']}",
+                                flush=True,
+                            )
+                            run_id += 1
+
+    run_output = Path("simulation_sweep_run_results.csv")
+    flight_output = Path("simulation_sweep_flight_results.csv")
+
+    run_fieldnames = [
+        "run_id",
+        "seed",
+        "phase",
+        "speed_profile",
+        "altitude_profile",
+        "bs_density_profile",
+        "bs_spacing_km",
+        "generated_flights",
+        "run_duration_s",
+        "policy",
+        "completed_flights",
+        "total_flights",
+        "total_handovers",
+        "handover_attempts",
+        "radio_handover_successes",
+        "radio_handover_failures",
+        "service_continuity_successes",
+        "service_continuity_failures",
+        "ping_pong_events",
+        "control_latency_violations",
+        "precache_hits",
+        "mean_throughput_mbps",
+        "mean_sinr_db",
+        "total_interruption_ms",
+    ]
+
+    flight_fieldnames = [
+        "run_id",
+        "seed",
+        "phase",
+        "speed_profile",
+        "altitude_profile",
+        "bs_density_profile",
+        "bs_spacing_km",
+        "generated_flights",
+        "run_duration_s",
+        "policy",
+        "flight_id",
+        "origin",
+        "destination",
+        "route_length_km",
+        "speed_kmh",
+        "altitude_m",
+        "service",
+        "handover_count",
+        "radio_handover_successes",
+        "radio_handover_failures",
+        "service_continuity_successes",
+        "service_continuity_failures",
+        "ping_pong_events",
+        "precache_hits",
+        "latency_violations",
+        "mean_throughput_mbps",
+        "mean_sinr_db",
+        "total_interruption_ms",
+        "completed",
+    ]
+
+    with run_output.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=run_fieldnames)
+        writer.writeheader()
+        writer.writerows(run_rows)
+
+    with flight_output.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=flight_fieldnames)
+        writer.writeheader()
+        writer.writerows(flight_rows)
+
+    total_elapsed = time.perf_counter() - sweep_started_at
+    print(
+        "[SAVE ] "
+        f"run_csv={run_output.resolve()} "
+        f"flight_csv={flight_output.resolve()} "
+        f"total_elapsed={_format_duration(total_elapsed)}",
+        flush=True,
+    )
+    print(run_output.resolve())
+    print(flight_output.resolve())
+    print(f"run_rows={len(run_rows)} flight_rows={len(flight_rows)}")
+
+
+if __name__ == "__main__":
+    main()
