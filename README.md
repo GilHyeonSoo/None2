@@ -104,3 +104,47 @@ python3 /Users/apple/Desktop/논문/scripts/analyze_simulation_csv.p
 /Users/apple/Desktop/논문/results/analysis/analysis_service_continuity_breakdown.csv
 /Users/apple/Desktop/논문/results/analysis/analysis_handover_failure_rate.csv
 /Users/apple/Desktop/논문/results/analysis/analysis_latency_violation_deep.csv
+
+
+
+## 윈도우
+윈도우에서는 프로젝트 폴더 안에서 아래처럼 치면 됩니다.
+
+`CMD` 또는 `PowerShell` 한 줄:
+```bat
+python scripts\run_simulation_sweep.py --seed-spec 1-30 --policies reactive,a3_ttt,proactive --run-duration-s 1800 --traffic-hours 1.0 --output-prefix seed30_final
+```
+
+분석 명령:
+```bat
+python scripts\analyze_simulation_csv.py --run-csv results\raw\seed30_final_run_results.csv --flight-csv results\raw\seed30_final_flight_results.csv
+```
+
+`python`이 안 먹으면 `py`로 바꾸면 됩니다.
+```bat
+py scripts\run_simulation_sweep.py --seed-spec 1-30 --policies reactive,a3_ttt,proactive --run-duration-s 1800 --traffic-hours 1.0 --output-prefix seed30_final
+```
+
+여러 줄로 쓰려면:
+
+`CMD`
+```bat
+python scripts\run_simulation_sweep.py ^
+  --seed-spec 1-30 ^
+  --policies reactive,a3_ttt,proactive ^
+  --run-duration-s 1800 ^
+  --traffic-hours 1.0 ^
+  --output-prefix seed30_final
+```
+
+`PowerShell`
+```powershell
+python scripts\run_simulation_sweep.py `
+  --seed-spec 1-30 `
+  --policies reactive,a3_ttt,proactive `
+  --run-duration-s 1800 `
+  --traffic-hours 1.0 `
+  --output-prefix seed30_final
+```
+
+먼저 확인만 하려면 끝에 `--dry-run`을 붙이면 됩니다.
