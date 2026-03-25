@@ -1,0 +1,7 @@
+policy,phase,total_flights,handover_attempts,service_continuity_successes,service_continuity_failures,service_success_per_total_flights_pct,service_success_per_handover_pct,flights_with_any_service_success_pct,flights_with_zero_service_failures_pct,zero_interruption_pct,zero_ping_pong_pct,zero_latency_violation_pct,complete_success_pct
+proactive,growth,1116,16819,792,16027,70.96774193548387,4.708960104643558,45.878136200716845,0.0,0.0,8.870967741935484,0.0,0.0
+proactive,introduction,1116,12031,432,11599,38.70967741935484,3.5907239630953374,33.78136200716846,0.0,0.0,17.293906810035843,0.0,0.0
+proactive,maturity,1116,22204,736,21468,65.94982078853047,3.3147180688164295,41.03942652329749,0.5376344086021506,0.0,10.21505376344086,0.0,0.0
+reactive,growth,1116,52246,0,52246,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0
+reactive,introduction,1116,40261,0,40261,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0
+reactive,maturity,1116,65331,0,65331,0.0,0.0,0.0,0.0,0.0,0.8064516129032258,0.0,0.0

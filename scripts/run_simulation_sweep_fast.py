@@ -2,6 +2,7 @@ import csv
 from pathlib import Path
 
 from simulation_env import SimulationConfig, UAMHandoverSimulation
+from paths import RAW_RESULTS_DIR
 
 
 SPEED_PROFILES = {
@@ -66,8 +67,9 @@ def main() -> None:
                             )
                             run_id += 1
 
-    run_output = Path("simulation_sweep_run_results_fast.csv")
-    flight_output = Path("simulation_sweep_flight_results_fast.csv")
+    RAW_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    run_output = RAW_RESULTS_DIR / "simulation_sweep_run_results_fast.csv"
+    flight_output = RAW_RESULTS_DIR / "simulation_sweep_flight_results_fast.csv"
 
     run_fieldnames = [
         "run_id",

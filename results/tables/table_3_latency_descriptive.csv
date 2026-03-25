@@ -1,0 +1,3 @@
+policy,mean,median,std,min,max,count
+proactive,529.4289,443.5,314.8528,59.0,1807.0,3348.0
+reactive,558.4238,468.5,331.9167,68.0,1950.0,3348.0

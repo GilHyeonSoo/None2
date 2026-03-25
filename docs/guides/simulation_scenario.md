@@ -9,7 +9,7 @@
 - 수도권 UAM 네트워크는 도입기 4개, 성장기 8개, 성숙기 20개 버티포트로 확장된다.
 - 단계별 참고 노선 수는 8, 14, 123개이다.
 - 단계별 일일 수요는 29명, 4,536명, 113,179명으로 제시된다.
-- 근거: [`/Users/apple/Desktop/논문/RelatedWorks/국내논문2.pdf`](/Users/apple/Desktop/논문/RelatedWorks/국내논문2.pdf)
+- 근거: [`/Users/apple/Desktop/논문/docs/references/related_works/국내논문2.pdf`](/Users/apple/Desktop/논문/docs/references/related_works/국내논문2.pdf)
 
 위 결과를 바탕으로 시뮬레이터는 `introduction`, `growth`, `maturity`의 3개 단계를 제공하며, 각 단계에서 활성화되는 버티포트 수를 각각 4, 8, 20으로 설정한다.
 
@@ -17,14 +17,14 @@
 - K-UAM 수도권 네트워크 연구는 성장기 확장 대상 구간을 시군구 기준 20∼50km 통행으로 설명한다.
 - 상파울루 UAM 네트워크 연구는 초기 UAM 노선 길이를 7.41km에서 48.7km 범위로 제시한다.
 - 상파울루 연구는 각 vertiport/airport를 네트워크에 연결할 때 two nearest neighbors와 Dijkstra 기반 shortest path를 사용한다.
-- 근거: [`/Users/apple/Desktop/논문/RelatedWorks/국내논문2.pdf`](/Users/apple/Desktop/논문/RelatedWorks/국내논문2.pdf), [`/Users/apple/Desktop/논문/RelatedWorks/해외논문2.pdf`](/Users/apple/Desktop/논문/RelatedWorks/해외논문2.pdf)
+- 근거: [`/Users/apple/Desktop/논문/docs/references/related_works/국내논문2.pdf`](/Users/apple/Desktop/논문/docs/references/related_works/국내논문2.pdf), [`/Users/apple/Desktop/논문/docs/references/related_works/해외논문2.pdf`](/Users/apple/Desktop/논문/docs/references/related_works/해외논문2.pdf)
 
 이에 따라 시뮬레이터는 버티포트 그래프를 구성할 때 각 노드를 최근접 2개 노드와 연결하고, 실제 비행 경로는 Dijkstra 최단경로로 산출한다. 경로 길이는 7.41km 이상 48.7km 이하를 기본 범위로 두고, 특히 20km 이상 구간은 수도권 확장 수요를 반영하는 대표 평가 구간으로 간주한다.
 
 ### 2.3 운항량 기준
 - 상파울루 연구는 초기 도입 단계의 기준 수요로 약 186 operations per day를 제시한다.
 - 해당 연구는 이 수치가 현재 헬리콥터 운항량의 약 9.3% 수준이라고 설명한다.
-- 근거: [`/Users/apple/Desktop/논문/RelatedWorks/해외논문2.pdf`](/Users/apple/Desktop/논문/RelatedWorks/해외논문2.pdf)
+- 근거: [`/Users/apple/Desktop/논문/docs/references/related_works/해외논문2.pdf`](/Users/apple/Desktop/논문/docs/references/related_works/해외논문2.pdf)
 
 본 시뮬레이터는 직접적인 일일 운항 횟수 값이 제시된 자료가 상파울루 연구이므로, 기본 기준 운항량을 186회/일로 둔다. 이후 18시간 운항 창과 피크 시간 계수(`peak_hour_multiplier`)를 적용하여 1시간 단위의 스트레스 트래픽을 생성한다.
 
@@ -32,7 +32,7 @@
 - NTN 리뷰 논문은 TS 22.261 기반 vehicular connectivity에서 UE 속도를 최대 250km/h로 제시한다.
 - 같은 문헌은 airborne service 요구사항에서 Remote UAV controller through HD video에 대해 25Mb/s uplink, 100ms latency, 300kb/s downlink, 20ms latency를 제시한다.
 - 실시간 비디오는 100ms, 1080p 비디오 스트리밍은 200ms 지연 조건을 사용한다.
-- 근거: [`/Users/apple/Desktop/논문/RelatedWorks/해외논문1.pdf`](/Users/apple/Desktop/논문/RelatedWorks/해외논문1.pdf)
+- 근거: [`/Users/apple/Desktop/논문/docs/references/related_works/해외논문1.pdf`](/Users/apple/Desktop/논문/docs/references/related_works/해외논문1.pdf)
 
 따라서 시뮬레이터는 UAM 속도 상한을 250km/h로 설정하고, 서비스 프로파일은 다음과 같이 둔다.
 
@@ -43,7 +43,7 @@
 ### 2.5 네트워크 제어 절차 근거
 - NTN 리뷰 논문은 UAV가 planned flight route information과 required QoS를 UTM/5G 시스템에 제공하고, 네트워크가 해당 경로에서 QoS 가능 여부를 사전 검토하는 절차를 설명한다.
 - 같은 문헌은 mobility management와 network switching strategies를 핵심 연구 과제로 지적한다.
-- 근거: [`/Users/apple/Desktop/논문/RelatedWorks/해외논문1.pdf`](/Users/apple/Desktop/논문/RelatedWorks/해외논문1.pdf)
+- 근거: [`/Users/apple/Desktop/논문/docs/references/related_works/해외논문1.pdf`](/Users/apple/Desktop/논문/docs/references/related_works/해외논문1.pdf)
 
 본 시뮬레이션의 선제적 핸드오버 정책은 바로 이 절차를 단순화하여 반영한다. 즉, 비행 경로 사전 공유, 후보 셀 예약, TTL 기반 전환 준비, 프리캐싱 완료 후 전환을 한 흐름으로 구현한다.
 
@@ -76,7 +76,7 @@
 - 이유: 관련 논문은 상공 간섭과 downtilt 기반 열세를 논의하나 세부 PHY 파라미터를 고정하지 않으므로, 5G 중대역을 가정한 단순화 모델을 적용하였다.
 
 ## 4. Python 환경 구성
-Python 환경은 [`/Users/apple/Desktop/논문/simulation_env.py`](/Users/apple/Desktop/논문/simulation_env.py)에 구현하였다. 핵심 구성은 다음과 같다.
+Python 환경은 [`/Users/apple/Desktop/논문/scripts/simulation_env.py`](/Users/apple/Desktop/논문/scripts/simulation_env.py)에 구현하였다. 핵심 구성은 다음과 같다.
 
 ### 4.1 네트워크 토폴로지
 - `PhaseProfile`: 도입기, 성장기, 성숙기 규모를 관리한다.

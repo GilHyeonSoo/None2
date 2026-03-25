@@ -1,0 +1,2 @@
+comparison_target,test_name,u_statistic,mann_whitney_p_value,rank_biserial_effect_size,total_n
+proactive_vs_reactive,two_sided_u_test,5310434.5,0.0002,-0.0525,6696

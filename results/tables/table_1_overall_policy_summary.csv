@@ -1,0 +1,3 @@
+policy,mean_total_handovers,mean_ping_pong_events,mean_total_interruption_s,mean_service_success_rate_pct,mean_throughput_mbps,mean_sinr_db,handover_attempts,radio_handover_failures,handover_failure_rate_pct
+reactive,1461.463,917.4907,162.3663,0.0,10.8135,5.1923,157838,0,0.0
+proactive,472.7222,137.0185,16.1183,3.8566,10.2001,4.2653,51054,552,1.0812

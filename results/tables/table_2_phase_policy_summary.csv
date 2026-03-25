@@ -1,0 +1,7 @@
+phase,policy,mean_total_handovers,mean_ping_pong_events,mean_total_interruption_s,mean_service_success_rate_pct,mean_throughput_mbps,mean_sinr_db
+introduction,reactive,1118.3611,773.0,122.2272,0.0,10.25,4.3867
+introduction,proactive,334.1944,113.6111,11.4208,3.6182,9.6867,3.5447
+growth,reactive,1451.2778,930.6389,158.3143,0.0,11.1208,5.8833
+growth,proactive,467.1944,150.8056,15.8196,4.5821,10.4778,4.9458
+maturity,reactive,1814.75,1048.8333,206.5573,0.0,11.0697,5.3069
+maturity,proactive,616.7778,146.6389,21.1144,3.3697,10.4358,4.3053
