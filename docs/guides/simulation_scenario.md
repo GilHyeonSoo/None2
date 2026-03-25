@@ -66,14 +66,24 @@
 - `300m`, `450m`, `600m`
 - 이유: 관련 논문은 air corridor와 airborne communication을 강조하지만 고도 수치를 고정하지 않는다. 시뮬레이터는 3차원성 반영을 위해 세 개의 대표 고도 밴드를 사용한다.
 
-### 3.5 시간 해상도
+### 3.5 이착륙 수직 전이 구간
+- 각 비행은 `takeoff -> climb -> cruise -> descent -> landing`의 고도 변화를 가진다.
+- 순항 고도는 `300m`, `450m`, `600m` 중 하나로 선택되지만, 실제 링크 평가는 비행 내내 고정 고도가 아니라 시간가변 고도를 사용한다.
+- 이륙 후 초기 구간과 목적지 접근 말기 구간에는 `0~300m` 수직 전이 구간을 두어, 버티포트 인근의 급격한 고도 변화와 안테나 패턴 변화를 반영한다.
+- 수직 전이 길이는 고정 거리와 수직 속도 기반 산정값 중 큰 값을 사용하여, 고속 기체일수록 더 긴 climb/descent corridor를 갖도록 설정한다.
+- 이유: eVTOL 운항에서 가장 민감한 통신 전환 구간은 수평 순항보다 이착륙 전환 구간에 가깝기 때문이다.
+
+### 3.6 시간 해상도
 - `0.5초`
 - 이유: 초고속 이동체가 셀 경계를 빠르게 통과하는 상황을 추적하면서도 Python 단일 프로세스에서 반복 실험이 가능하도록 설정하였다.
 
-### 3.6 전파 및 부하 모델
+### 3.7 전파 및 부하 모델
 - 3.5GHz carrier, 43dBm 송신 출력, -104dBm noise floor를 사용한다.
 - 기지국 하향 틸트에 따른 aerial penalty와 corridor load penalty를 별도로 둔다.
-- 이유: 관련 논문은 상공 간섭과 downtilt 기반 열세를 논의하나 세부 PHY 파라미터를 고정하지 않으므로, 5G 중대역을 가정한 단순화 모델을 적용하였다.
+- 채널 모델은 3GPP TR 36.777의 UAV 공중 링크 특성과 ITU-R P.1410-5의 도시 단거리 전파 구분을 참조한 `LoS/NLoS 분리형 단순화 모델`로 정리한다.
+- 구체적으로는 3차원 FSPL을 기본 손실로 사용하고, 고도와 수평거리로부터 LoS 확률을 계산한 뒤, LoS/NLoS에 따라 shadowing 표준편차와 소규모 fading 분포를 다르게 적용한다.
+- LoS 상태에서는 Rician형 fading, NLoS 상태에서는 Rayleigh형 fading을 적용하고, NLoS에는 추가 excess loss를 부여한다.
+- 이유: 관련 논문은 상공 간섭과 downtilt 기반 열세를 논의하나 완전한 표준 파라미터 세트를 제공하지 않으므로, 표준 문헌의 방향성을 보존한 단순화 모델을 적용하였다.
 
 ## 4. Python 환경 구성
 Python 환경은 [`/Users/apple/Desktop/논문/scripts/simulation_env.py`](/Users/apple/Desktop/논문/scripts/simulation_env.py)에 구현하였다. 핵심 구성은 다음과 같다.
@@ -114,11 +124,12 @@ Python 환경은 [`/Users/apple/Desktop/논문/scripts/simulation_en
 
 ### 5.3 핸드오버 절차
 1. 비행 생성 시 origin-destination 경로를 계산한다.
-2. 초기 serving cell을 선택한다.
-3. 매 step마다 위치와 링크 품질을 갱신한다.
+2. 초기 고도는 지면 근처에서 시작하고, 이후 climb 구간을 따라 순항 고도까지 상승한다.
+3. 매 step마다 위치와 고도, 링크 품질을 함께 갱신한다.
 4. `reactive`는 현재 최적 셀로 즉시 전환한다.
-5. `proactive`는 미래 8초 위치를 예측하고, 1초 선행 프리캐싱이 완료되면 전환한다.
-6. 전환 후 interruption time, ping-pong 여부, 지연 위반 여부를 누적한다.
+5. `proactive`는 미래 8초 위치와 미래 고도를 동시에 예측하고, 1초 선행 프리캐싱이 완료되면 전환한다.
+6. 목적지 접근 시 descent 구간에서 다시 저고도 링크 환경으로 진입한다.
+7. 전환 후 interruption time, ping-pong 여부, 지연 위반 여부를 누적한다.
 
 ### 5.4 주요 지표
 - 총 핸드오버 횟수
@@ -129,6 +140,16 @@ Python 환경은 [`/Users/apple/Desktop/논문/scripts/simulation_en
 - 평균 SINR
 - 평균 처리량
 - precache hit 수
+- precache request 수와 실제 commit 수
+- precache backhaul volume(MB), peak cache usage(MB), peak active cache entry 수
+- precache TTL expiry 수와 explicit reclaim 수
+- reservation collision 수와 control slice exhaustion 수
+
+### 5.5 동시 핸드오버 경합 모델
+- proactive 준비 단계에서는 target BS별 control reservation과 edge cache 사용량을 함께 확인한다.
+- 동일 시점에 여러 비행이 같은 target BS를 선점하려고 할 경우, reserved control slice 한계를 초과하면 reservation collision과 control slice exhaustion으로 기록한다.
+- edge cache 사용량이 BS별 용량을 초과하면 cache overflow로 기록하고 준비를 거부한다.
+- 이로써 성숙기 고밀도 트래픽에서 proactive 준비 절차가 항상 무료로 성공하는 것은 아니라는 점을 모델에 반영한다.
 
 ## 6. 논문 본문에 기술할 수 있는 해석 포인트
 - 국내 연구의 단계형 버티포트 수와 노선 수를 적용함으로써, 제안 환경은 수도권 UAM의 네트워크 확장 단계를 반영한다.

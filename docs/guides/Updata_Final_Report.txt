@@ -1,0 +1,69 @@
+Updata 최종 반영 보고서
+
+본 보고서는 /Users/apple/Desktop/논문/docs/guides/Updata.md 의 10개 개선 요구에 대한 반영 여부를 점검하고, 각 항목별로 3~5줄 코멘트를 정리한 문서이다.
+추가 대규모 시뮬레이션은 사용자가 직접 수행하는 것을 전제로 하며, 본 단계에서는 코드, 실행 구조, 분석 기준, 논문 서술을 정비하는 데 초점을 두었다.
+
+1. Seed 수 확대
+반영 상태: 완료
+run_simulation_sweep.py는 더 이상 seed 2개 고정 구조가 아니며, --seed-spec으로 1-30 같은 범위를 직접 받을 수 있다.
+--dry-run, --output-prefix, manifest 저장 구조를 추가해 대규모 반복 실험의 재현성과 관리 편의성을 확보했다.
+따라서 통계 신뢰성 문제는 “코드 구조상 해결”된 상태이며, 최종 신뢰구간 확보는 사용자의 30개 이상 seed 재실행에 달려 있다.
+
+2. 표준 채널 모델 명시 및 적용
+반영 상태: 완료
+simulation_env.py에 3GPP TR 36.777와 ITU-R P.1410-5를 참조한 LoS/NLoS 분리형 단순화 모델을 반영했다.
+LoS probability, shadowing, NLoS excess loss, Rician/Rayleigh 성격의 fading, 고도 의존 downtilt penalty를 코드와 문서에 명시했다.
+다만 이는 표준의 완전 복제가 아니라 literature-backed simplified model이므로, 논문에서는 그 한계를 솔직하게 밝히도록 정리했다.
+
+3. 처리량 요구치 미달 분석
+반영 상태: 완료
+평균 처리량만 남기던 구조를 확장하여 throughput gap, demand satisfaction 비율, throughput-to-demand 비율을 결과 CSV에 남기도록 바꿨다.
+analyze_simulation_csv.py는 analysis_throughput_gap_breakdown.csv를 새로 생성하여 정책별, 단계별, 조건별 미달 정도를 직접 보여준다.
+기존 데이터 기준으로도 두 정책 모두 25 Mb/s 요구치를 충족하지 못함을 확인했으며, 논문 본문 역시 이 문제를 핵심 한계로 다시 서술했다.
+
+4. Service Continuity 3.86% 과장 해석 수정
+반영 상태: 완료
+service continuity를 “향상” 자체보다 “절대값이 매우 낮은 strict criterion 결과”로 읽도록 해석 기준을 수정했다.
+분석 스크립트는 최고 strict success rate가 매우 낮다는 점을 직접 출력하고, 논문 초록과 결론은 안전 수준 미달이라는 표현으로 낮췄다.
+즉 3.86%는 개선의 흔적은 있으나 운항 수준의 C2-grade continuity와는 거리가 멀다는 관점으로 정리되었다.
+
+5. Latency violation 결과의 솔직한 해석
+반영 상태: 완료
+기존에는 p-value가 강조될 여지가 있었으나, 이제는 effect size가 매우 작다는 점을 해석의 중심에 두도록 수정했다.
+analyze_simulation_csv.py는 p-value와 함께 “실질 효과가 작은 편”이라는 해석을 직접 출력한다.
+논문 본문도 latency violation 개선을 강한 우위가 아니라 제한적 감소로만 기술하도록 보수적으로 다시 썼다.
+
+6. 비교 baseline 강화
+반영 상태: 완료
+reactive와 proactive만 있던 구조에 a3_ttt baseline을 추가해, 최소한 고전적 A3+TTT형 기준과 비교할 수 있게 만들었다.
+실행 스크립트는 세 정책을 모두 sweep 대상으로 지원하며, 30개 seed 기준 총 4860 run 구조까지 정리됐다.
+다만 ML baseline 결과는 아직 생성되지 않았으므로, 현재 단계의 baseline 강화는 “고전적 기준 추가”까지 반영된 상태라고 보는 것이 가장 정확하다.
+
+7. Radio handover failure 측정 기준 통일
+반영 상태: 완료
+HandoverOutcome와 _evaluate_handover_outcome()를 추가하여 radio success/failure와 service continuity success/failure를 단일 로직으로 평가하게 했다.
+이제 radio failure는 정책과 무관하게 target throughput이 handover floor에 미달한 경우로 동일하게 판정된다.
+reactive 0건과 proactive 1.08%의 차이도 측정 경로 차이가 아니라 정책 선택 결과라는 점을 코드와 문서 모두에서 명확히 설명할 수 있게 되었다.
+
+8. 이착륙 수직 전이 구간 추가
+반영 상태: 완료
+비행 모델을 고정 고도 순항에서 takeoff-climb-cruise-descent-landing 구조로 확장했다.
+flight에는 cruise_altitude, vertical_phase, climb/descent distance, distance_to_destination 같은 상태가 추가되었고, proactive 예측도 미래 altitude를 함께 사용한다.
+따라서 0~300m 전이 구간이 완전히 빠진 구조는 아니게 되었으며, 실제 UAM 운항의 민감 구간을 반영하는 방향으로 개선되었다.
+
+9. 다중 기체 동시 핸드오버 경합 추가
+반영 상태: 완료
+precache reservation, control slice exhaustion, reservation collision, edge cache overflow를 별도 계수로 추가했다.
+이제 proactive는 공짜 준비 절차가 아니라 control 자원과 cache 자원을 실제로 점유하는 정책으로 모델링된다.
+성숙기나 sparse 조건에서 실패가 어디서 발생하는지, 그리고 동시 handover 경합이 어느 정도인지 재실험 후 직접 계량할 수 있는 기반이 마련되었다.
+
+10. 엣지 프리캐싱 비용 정량화
+반영 상태: 완료
+precache requests, commits, backhaul traffic, TTL expiry, reclaim, peak cache usage를 run-level과 flight-level 결과에 함께 저장하도록 수정했다.
+이로써 프리캐싱의 효과만이 아니라 backhaul 부담과 cache occupancy를 동시에 평가할 수 있게 되었다.
+논문 해석도 “비용 없는 개선”이 아니라 “비용과 이득을 함께 봐야 하는 절충안”이라는 방향으로 옮겨 갔다.
+
+종합 소견
+이번 정비를 통해 Updata.md의 10개 요구는 실행 구조, 시뮬레이터 내부 지표, 분석 기준, 논문 서술 차원에서 모두 반영되었다.
+다만 최종 논문용 수치는 사용자가 30개 이상 seed와 3개 baseline을 포함한 재실험을 수행한 뒤 다시 산출해야 하며, 그 이전의 수치는 어디까지나 기존 데이터 기반의 보수적 재해석 결과이다.
+권장 실행 절차는 /Users/apple/Desktop/논문/docs/guides/Final_Simulation_Execution_Guide.md 를 따른다.

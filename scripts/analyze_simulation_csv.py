@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 from typing import Iterable
 
@@ -8,8 +9,13 @@ import pandas as pd
 from scipy.stats import mannwhitneyu, spearmanr
 from paths import ANALYSIS_RESULTS_DIR, RAW_RESULTS_DIR
 
-RUN_CSV = RAW_RESULTS_DIR / "simulation_sweep_run_results.csv"
-FLIGHT_CSV = RAW_RESULTS_DIR / "simulation_sweep_flight_results.csv"
+DEFAULT_RUN_CSV = RAW_RESULTS_DIR / "simulation_sweep_run_results.csv"
+DEFAULT_FLIGHT_CSV = RAW_RESULTS_DIR / "simulation_sweep_flight_results.csv"
+SERVICE_DEMAND_MBPS = {
+    "remote_uav_hd_control": 25.0,
+    "real_time_video": 4.0,
+    "video_streaming_1080p": 9.0,
+}
 
 
 def _save_csv(df: pd.DataFrame, path: Path) -> None:
@@ -30,14 +36,98 @@ def _format_table(df: pd.DataFrame, float_cols: Iterable[str] | None = None) -> 
     return df.to_string(index=False)
 
 
-def load_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
-    run_df = pd.read_csv(RUN_CSV)
-    flight_df = pd.read_csv(FLIGHT_CSV)
+def _ensure_columns(df: pd.DataFrame, defaults: dict[str, object]) -> pd.DataFrame:
+    for column, default_value in defaults.items():
+        if column not in df.columns:
+            df[column] = default_value
+    return df
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Analyze UAM sweep CSV files and generate derived analysis tables."
+    )
+    parser.add_argument(
+        "--run-csv",
+        type=Path,
+        default=DEFAULT_RUN_CSV,
+        help=f"Run-level CSV path. Default: {DEFAULT_RUN_CSV}",
+    )
+    parser.add_argument(
+        "--flight-csv",
+        type=Path,
+        default=DEFAULT_FLIGHT_CSV,
+        help=f"Flight-level CSV path. Default: {DEFAULT_FLIGHT_CSV}",
+    )
+    return parser
+
+
+def load_frames(run_csv: Path, flight_csv: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    run_df = pd.read_csv(run_csv)
+    flight_df = pd.read_csv(flight_csv)
+
+    _ensure_columns(
+        run_df,
+        {
+            "radio_failures_low_throughput": 0,
+            "service_failures_radio_only": 0,
+            "service_failures_latency_only": 0,
+            "service_failures_dual": 0,
+            "mean_throughput_gap_mbps": np.nan,
+            "demand_satisfied_sample_pct": np.nan,
+        },
+    )
+    _ensure_columns(
+        flight_df,
+        {
+            "radio_failures_low_throughput": 0,
+            "service_failures_radio_only": 0,
+            "service_failures_latency_only": 0,
+            "service_failures_dual": 0,
+            "mean_throughput_gap_mbps": np.nan,
+            "throughput_to_demand_pct": np.nan,
+            "demand_satisfied_sample_pct": np.nan,
+            "cruise_altitude_m": np.nan,
+            "vertical_phase": np.nan,
+            "distance_to_destination_km": np.nan,
+        },
+    )
 
     # Assumption:
     # DataRead.md asks for service_handover_count, but the source CSV stores the
     # same notion as handover_count. We add an explicit alias for analysis.
     flight_df["service_handover_count"] = flight_df["handover_count"]
+    flight_df["demand_mbps"] = flight_df["service"].map(SERVICE_DEMAND_MBPS).fillna(
+        SERVICE_DEMAND_MBPS["remote_uav_hd_control"]
+    )
+    flight_df["throughput_gap_mbps"] = (
+        flight_df["demand_mbps"] - flight_df["mean_throughput_mbps"]
+    ).clip(lower=0.0)
+    flight_df["throughput_to_demand_pct"] = np.where(
+        flight_df["demand_mbps"] > 0,
+        (flight_df["mean_throughput_mbps"] / flight_df["demand_mbps"]) * 100.0,
+        0.0,
+    )
+    missing_demand_satisfied = flight_df["demand_satisfied_sample_pct"].isna()
+    flight_df.loc[missing_demand_satisfied, "demand_satisfied_sample_pct"] = np.where(
+        flight_df.loc[missing_demand_satisfied, "mean_throughput_mbps"]
+        >= flight_df.loc[missing_demand_satisfied, "demand_mbps"],
+        100.0,
+        0.0,
+    )
+    flight_df["meets_mean_demand"] = (
+        flight_df["mean_throughput_mbps"] >= flight_df["demand_mbps"]
+    ).astype(int)
+    run_df["mean_throughput_gap_mbps"] = (
+        SERVICE_DEMAND_MBPS["remote_uav_hd_control"] - run_df["mean_throughput_mbps"]
+    ).clip(lower=0.0)
+    missing_run_demand_satisfied = run_df["demand_satisfied_sample_pct"].isna()
+    run_df.loc[missing_run_demand_satisfied, "demand_satisfied_sample_pct"] = np.where(
+        run_df.loc[missing_run_demand_satisfied, "mean_throughput_mbps"]
+        >= SERVICE_DEMAND_MBPS["remote_uav_hd_control"],
+        100.0,
+        0.0,
+    )
     run_df["service_success_rate_pct"] = _pct(
         run_df["service_continuity_successes"], run_df["handover_attempts"]
     )
@@ -134,9 +224,16 @@ def analyze_service_continuity(
             == flight_df["service_continuity_successes"] + flight_df["service_continuity_failures"]
         ).all()
     )
+    max_strict_success = float(output["service_success_per_handover_pct"].max())
     print("\n[TASK 1-2] 서비스 연속성 저조 원인 진단")
     print(f"- all_rows(service_handover_count == service_successes + service_failures): {equality_service}")
     print("- interpretation: service_continuity_successes는 비행 단위 binary가 아니라 핸드오버 이벤트 성공 횟수입니다.")
+    print(
+        "- interpretation: strict continuity는 `handover floor throughput + interruption <= latency budget`를 동시에 만족해야 하므로,"
+    )
+    print(
+        f"  현재 데이터의 최고 strict success rate도 {max_strict_success:.4f}%에 불과합니다. 이는 안전 운항 수준을 의미하지 않습니다."
+    )
     print("- zero_interruption_pct와 zero_latency_violation_pct가 모든 정책/단계에서 0%이면, 완전 성공 조건은 현재 데이터에서 사실상 성립하지 않습니다.")
     print(_format_table(
         output[
@@ -229,6 +326,12 @@ def analyze_latency_violations(flight_df: pd.DataFrame) -> pd.DataFrame:
         f"rank_biserial_effect_size={rank_biserial:.6f}"
     )
     print("note: rank_biserial < 0 이면 proactive의 latency_violations가 더 낮다는 뜻입니다.")
+    print(
+        "interpretation: p-value는 유의하지만 effect size 절대값이 0.1보다 훨씬 작으므로,"
+    )
+    print(
+        "  latency violation 감소는 실질 효과가 작은 편이며, 정책 자체보다 환경 변수 영향이 더 크다고 해석하는 것이 타당합니다."
+    )
 
     corr_view = output[output["analysis_section"] == "spearman_correlation"][
         ["policy", "variable", "value", "p_value"]
@@ -343,6 +446,8 @@ def analyze_handover_failures(run_df: pd.DataFrame, flight_df: pd.DataFrame) -> 
 
     print("\n[TASK 1-3] 전체 핸드오버 실패율")
     print(_format_table(overall[["policy", "handover_attempts", "radio_handover_failures", "handover_failure_rate_pct"]], ["handover_failure_rate_pct"]))
+    print("- definition: handover_failure_rate_pct = radio_handover_failures / handover_attempts")
+    print("- note: radio failure는 정책과 무관하게 `target throughput >= handover_floor_mbps` 기준을 만족하지 못한 경우로 해석해야 합니다.")
     print("\n[TASK 1-3] proactive 실패율 상위 10개 비행")
     print(
         _format_table(
@@ -367,6 +472,108 @@ def analyze_handover_failures(run_df: pd.DataFrame, flight_df: pd.DataFrame) -> 
     return output
 
 
+def analyze_throughput_gap(flight_df: pd.DataFrame) -> pd.DataFrame:
+    records: list[dict[str, object]] = []
+
+    def _append_group(scope: str, grouped: pd.DataFrame) -> None:
+        for _, row in grouped.iterrows():
+            records.append(
+                {
+                    "analysis_scope": scope,
+                    "policy": row["policy"],
+                    "phase": row.get("phase", np.nan),
+                    "speed_profile": row.get("speed_profile", np.nan),
+                    "altitude_profile": row.get("altitude_profile", np.nan),
+                    "bs_density_profile": row.get("bs_density_profile", np.nan),
+                    "sample_size": int(row["sample_size"]),
+                    "mean_demand_mbps": float(row["mean_demand_mbps"]),
+                    "mean_throughput_mbps": float(row["mean_throughput_mbps"]),
+                    "mean_throughput_gap_mbps": float(row["mean_throughput_gap_mbps"]),
+                    "mean_throughput_to_demand_pct": float(row["mean_throughput_to_demand_pct"]),
+                    "flights_meeting_mean_demand_pct": float(row["flights_meeting_mean_demand_pct"]),
+                    "mean_demand_satisfied_sample_pct": float(row["mean_demand_satisfied_sample_pct"]),
+                }
+            )
+
+    overall = (
+        flight_df.groupby("policy", as_index=False)
+        .agg(
+            sample_size=("flight_id", "size"),
+            mean_demand_mbps=("demand_mbps", "mean"),
+            mean_throughput_mbps=("mean_throughput_mbps", "mean"),
+            mean_throughput_gap_mbps=("throughput_gap_mbps", "mean"),
+            mean_throughput_to_demand_pct=("throughput_to_demand_pct", "mean"),
+            flights_meeting_mean_demand_pct=("meets_mean_demand", "mean"),
+            mean_demand_satisfied_sample_pct=("demand_satisfied_sample_pct", "mean"),
+        )
+    )
+    overall["flights_meeting_mean_demand_pct"] *= 100.0
+    _append_group("overall", overall)
+
+    by_phase = (
+        flight_df.groupby(["policy", "phase"], as_index=False)
+        .agg(
+            sample_size=("flight_id", "size"),
+            mean_demand_mbps=("demand_mbps", "mean"),
+            mean_throughput_mbps=("mean_throughput_mbps", "mean"),
+            mean_throughput_gap_mbps=("throughput_gap_mbps", "mean"),
+            mean_throughput_to_demand_pct=("throughput_to_demand_pct", "mean"),
+            flights_meeting_mean_demand_pct=("meets_mean_demand", "mean"),
+            mean_demand_satisfied_sample_pct=("demand_satisfied_sample_pct", "mean"),
+        )
+    )
+    by_phase["flights_meeting_mean_demand_pct"] *= 100.0
+    _append_group("by_phase", by_phase)
+
+    by_condition = (
+        flight_df.groupby(
+            ["policy", "phase", "speed_profile", "altitude_profile", "bs_density_profile"],
+            as_index=False,
+        )
+        .agg(
+            sample_size=("flight_id", "size"),
+            mean_demand_mbps=("demand_mbps", "mean"),
+            mean_throughput_mbps=("mean_throughput_mbps", "mean"),
+            mean_throughput_gap_mbps=("throughput_gap_mbps", "mean"),
+            mean_throughput_to_demand_pct=("throughput_to_demand_pct", "mean"),
+            flights_meeting_mean_demand_pct=("meets_mean_demand", "mean"),
+            mean_demand_satisfied_sample_pct=("demand_satisfied_sample_pct", "mean"),
+        )
+    )
+    by_condition["flights_meeting_mean_demand_pct"] *= 100.0
+    _append_group("by_condition", by_condition)
+
+    output = pd.DataFrame(records)
+
+    print("\n[TASK 1-4] 처리량 요구치 충족 분석")
+    print(
+        _format_table(
+            overall[
+                [
+                    "policy",
+                    "mean_demand_mbps",
+                    "mean_throughput_mbps",
+                    "mean_throughput_gap_mbps",
+                    "mean_throughput_to_demand_pct",
+                    "flights_meeting_mean_demand_pct",
+                ]
+            ],
+            [
+                "mean_demand_mbps",
+                "mean_throughput_mbps",
+                "mean_throughput_gap_mbps",
+                "mean_throughput_to_demand_pct",
+                "flights_meeting_mean_demand_pct",
+            ],
+        )
+    )
+    if bool((overall["flights_meeting_mean_demand_pct"] == 0.0).all()):
+        print("- interpretation: 현재 데이터에서는 어떤 정책도 평균 기준으로 25 Mb/s 요구 대역폭을 충족한 비행을 만들지 못했습니다.")
+    print("- interpretation: proactive의 처리량 저하는 interruption 감소와 교환된 구조적 trade-off로 해석해야 합니다.")
+
+    return output
+
+
 def build_additional_condition_sweep_summary(flight_df: pd.DataFrame) -> pd.DataFrame:
     grouped = (
         flight_df.groupby(
@@ -381,6 +588,9 @@ def build_additional_condition_sweep_summary(flight_df: pd.DataFrame) -> pd.Data
             service_continuity_successes=("service_continuity_successes", "sum"),
             service_handover_count=("service_handover_count", "sum"),
             mean_throughput_mbps=("mean_throughput_mbps", "mean"),
+            mean_throughput_gap_mbps=("throughput_gap_mbps", "mean"),
+            mean_throughput_to_demand_pct=("throughput_to_demand_pct", "mean"),
+            mean_demand_satisfied_sample_pct=("demand_satisfied_sample_pct", "mean"),
             mean_sinr_db=("mean_sinr_db", "mean"),
             sample_size=("flight_id", "size"),
         )
@@ -403,6 +613,9 @@ def build_additional_condition_sweep_summary(flight_df: pd.DataFrame) -> pd.Data
             "mean_latency_violations",
             "service_success_rate_pct",
             "mean_throughput_mbps",
+            "mean_throughput_gap_mbps",
+            "mean_throughput_to_demand_pct",
+            "mean_demand_satisfied_sample_pct",
             "mean_sinr_db",
             "sample_size",
         ]
@@ -442,7 +655,7 @@ def build_additional_route_performance(flight_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_additional_failure_analysis(flight_df: pd.DataFrame) -> pd.DataFrame:
-    original_columns = [
+    desired_columns = [
         "run_id",
         "seed",
         "phase",
@@ -459,26 +672,37 @@ def build_additional_failure_analysis(flight_df: pd.DataFrame) -> pd.DataFrame:
         "route_length_km",
         "speed_kmh",
         "altitude_m",
+        "cruise_altitude_m",
+        "vertical_phase",
+        "distance_to_destination_km",
         "service",
         "handover_count",
         "radio_handover_successes",
         "radio_handover_failures",
+        "radio_failures_low_throughput",
         "service_continuity_successes",
         "service_continuity_failures",
+        "service_failures_radio_only",
+        "service_failures_latency_only",
+        "service_failures_dual",
         "ping_pong_events",
         "precache_hits",
         "latency_violations",
         "mean_throughput_mbps",
+        "throughput_gap_mbps",
+        "throughput_to_demand_pct",
+        "demand_satisfied_sample_pct",
         "mean_sinr_db",
         "total_interruption_ms",
         "completed",
     ]
+    available_columns = [column for column in desired_columns if column in flight_df.columns]
 
     output = flight_df.loc[
         (flight_df["radio_handover_failures"] > 0)
         | (flight_df["service_continuity_failures"] > 0)
         | (flight_df["total_interruption_ms"] > 5000)
-    , original_columns + ["service_handover_count"]].copy()
+    , available_columns + ["service_handover_count"]].copy()
     output["handover_failure_rate"] = np.where(
         output["service_handover_count"] > 0,
         output["radio_handover_failures"] / output["service_handover_count"],
@@ -494,14 +718,23 @@ def build_additional_failure_analysis(flight_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def main() -> None:
-    if not RUN_CSV.exists() or not FLIGHT_CSV.exists():
-        raise FileNotFoundError("simulation_sweep_run_results.csv and simulation_sweep_flight_results.csv are required.")
+    args = _build_parser().parse_args()
+    run_csv = args.run_csv.resolve()
+    flight_csv = args.flight_csv.resolve()
+    if not run_csv.exists() or not flight_csv.exists():
+        raise FileNotFoundError(
+            f"Required input files were not found: run_csv={run_csv}, flight_csv={flight_csv}"
+        )
 
-    run_df, flight_df = load_frames()
+    print(f"[INPUT] run_csv={run_csv}")
+    print(f"[INPUT] flight_csv={flight_csv}")
+
+    run_df, flight_df = load_frames(run_csv=run_csv, flight_csv=flight_csv)
 
     service_continuity_df = analyze_service_continuity(run_df, flight_df)
     latency_df = analyze_latency_violations(flight_df)
     handover_failure_df = analyze_handover_failures(run_df, flight_df)
+    throughput_gap_df = analyze_throughput_gap(flight_df)
 
     additional_condition_df = build_additional_condition_sweep_summary(flight_df)
     additional_phase_df = build_additional_phase_progression(run_df)
@@ -512,6 +745,7 @@ def main() -> None:
     _save_csv(service_continuity_df, ANALYSIS_RESULTS_DIR / "analysis_service_continuity_breakdown.csv")
     _save_csv(latency_df, ANALYSIS_RESULTS_DIR / "analysis_latency_violation_deep.csv")
     _save_csv(handover_failure_df, ANALYSIS_RESULTS_DIR / "analysis_handover_failure_rate.csv")
+    _save_csv(throughput_gap_df, ANALYSIS_RESULTS_DIR / "analysis_throughput_gap_breakdown.csv")
     _save_csv(additional_condition_df, ANALYSIS_RESULTS_DIR / "additional_condition_sweep_summary.csv")
     _save_csv(additional_phase_df, ANALYSIS_RESULTS_DIR / "additional_phase_progression.csv")
     _save_csv(additional_route_df, ANALYSIS_RESULTS_DIR / "additional_route_performance.csv")
@@ -519,12 +753,13 @@ def main() -> None:
 
     print("\n[TASK 2] 추가 추출 파일 요약")
     for filename in [
+        "analysis_throughput_gap_breakdown.csv",
         "additional_condition_sweep_summary.csv",
         "additional_phase_progression.csv",
         "additional_route_performance.csv",
         "additional_failure_analysis.csv",
     ]:
-        path = BASE_DIR / filename
+        path = ANALYSIS_RESULTS_DIR / filename
         df = pd.read_csv(path)
         print(f"- {filename}: rows={len(df)} columns={list(df.columns)}")
 

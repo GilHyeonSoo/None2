@@ -1,3 +1,0 @@
-policy,phase,generated_flights,completed_flights,total_flights,total_handovers,handover_attempts,handover_successes,handover_failures,ping_pong_events,control_latency_violations,precache_hits,mean_throughput_mbps,mean_sinr_db,total_interruption_ms
-reactive,introduction,31,31,31,1753,1753,0,1753,1230,25458,0,9.43,3.09,185923.95
-proactive,introduction,31,31,31,1161,1161,10,1151,793,24250,10,9.42,2.92,40405.0

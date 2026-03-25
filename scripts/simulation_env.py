@@ -20,6 +20,13 @@ Literature-backed defaults used in this module:
    - Initial UAM routes: about 7.41 km to 48.7 km
    - Each vertiport/airport is attached to the route network using the two
      nearest neighbors, and Dijkstra is used for shortest-path routing
+4. Channel-model references used for the air-ground link abstraction:
+   - 3GPP TR 36.777 / 3GPP UAV study items: aerial UEs above rooftops are
+     often LoS-dominant and may observe multiple strong neighbor cells,
+     which increases interference and motivates height-aware mobility logic.
+   - ITU-R P.1410-5: rooftop transition, LoS/NLoS separation, reflected and
+     diffracted propagation regions, and building-wall reflection loss
+     guidance are used as references for a simplified metropolitan model.
 
 Values not explicitly provided by the papers are marked in comments as
 "modeling assumption".
@@ -132,8 +139,13 @@ class SimulationConfig:
     handover_margin_db: float = 2.5
     min_operational_sinr_db: float = 3.0
     handover_hysteresis_s: float = 2.0
+    a3_ttt_s: float = 3.0
+    a3_margin_db: float = 2.0
     proactive_trigger_window_s: float = 8.0
     precache_lead_time_s: float = 1.0
+    precache_ttl_s: float = 12.0
+    precache_control_reservation_mbps: float = 1.0
+    edge_cache_capacity_mb: float = 96.0
     ping_pong_window_s: float = 15.0
     bs_spacing_km: float = 4.0
     bs_height_m: float = 30.0
@@ -141,6 +153,15 @@ class SimulationConfig:
     reserved_control_slice_mbps: float = 5.0
     hub_route_bias: float = 0.7
     shadowing_tile_km: float = 0.5
+    rooftop_height_m: float = 30.0
+    los_shadowing_std_db: float = 1.8
+    nlos_shadowing_std_db: float = 4.5
+    nlos_excess_loss_db: float = 18.0
+    rician_k_db: float = 8.0
+    takeoff_transition_altitude_m: float = 300.0
+    takeoff_vertical_rate_mps: float = 6.0
+    landing_vertical_rate_mps: float = 5.0
+    vertical_transition_trigger_km: float = 3.0
 
     def __post_init__(self) -> None:
         if self.phase not in PHASE_PROFILES:
@@ -187,6 +208,7 @@ class Flight:
     waypoints: List[Tuple[float, float]]
     route_length_km: float
     speed_kmh: float
+    cruise_altitude_m: float
     altitude_m: float
     service: ServiceProfile
     current_bs: Optional[int] = None
@@ -198,6 +220,8 @@ class Flight:
     reserved_target_bs: Optional[int] = None
     precache_ready_at_s: float = math.inf
     last_handover_time_s: float = -math.inf
+    a3_candidate_bs: Optional[int] = None
+    a3_candidate_since_s: float = math.inf
     handover_history: List[Tuple[float, int]] = field(default_factory=list)
     handover_count: int = 0
     interruption_ms_total: float = 0.0
@@ -208,8 +232,29 @@ class Flight:
     service_continuity_failures: int = 0
     ping_pong_events: int = 0
     precache_hits: int = 0
+    precache_requests: int = 0
+    precache_commits: int = 0
+    precache_backhaul_mb: float = 0.0
+    precache_ttl_expiries: int = 0
+    precache_reclaims: int = 0
+    reservation_collisions: int = 0
+    control_slice_exhaustions: int = 0
+    edge_cache_overflows: int = 0
+    radio_failures_low_throughput: int = 0
+    service_failures_radio_only: int = 0
+    service_failures_latency_only: int = 0
+    service_failures_dual: int = 0
     throughput_samples: List[float] = field(default_factory=list)
+    throughput_gap_samples: List[float] = field(default_factory=list)
     sinr_samples: List[float] = field(default_factory=list)
+    demand_met_samples: int = 0
+    demand_unmet_samples: int = 0
+    vertical_phase: str = "climb"
+    climb_distance_km: float = 0.0
+    descent_distance_km: float = 0.0
+    takeoff_altitude_m: float = 0.0
+    total_distance_travelled_km: float = 0.0
+    distance_to_destination_km: float = 0.0
 
     def remaining_distance_km(self) -> float:
         if not self.active:
@@ -227,6 +272,47 @@ def _distance_km(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
+@dataclass
+class PrecacheEntry:
+    flight_id: int
+    target_bs: int
+    cache_size_mb: float
+    reserved_control_mbps: float
+    created_at_s: float
+    ready_at_s: float
+    expire_at_s: float
+
+
+@dataclass(frozen=True)
+class HandoverOutcome:
+    observed_throughput_mbps: float
+    required_floor_mbps: float
+    interruption_ms: float
+    latency_budget_ms: float
+    meets_handover_floor: bool
+    meets_latency_budget: bool
+
+    @property
+    def radio_success(self) -> bool:
+        return self.meets_handover_floor
+
+    @property
+    def service_success(self) -> bool:
+        return self.meets_handover_floor and self.meets_latency_budget
+
+    @property
+    def service_failure_radio_only(self) -> bool:
+        return (not self.meets_handover_floor) and self.meets_latency_budget
+
+    @property
+    def service_failure_latency_only(self) -> bool:
+        return self.meets_handover_floor and (not self.meets_latency_budget)
+
+    @property
+    def service_failure_dual(self) -> bool:
+        return (not self.meets_handover_floor) and (not self.meets_latency_budget)
+
+
 class UAMHandoverSimulation:
     def __init__(self, config: SimulationConfig):
         self.cfg = config
@@ -237,14 +323,32 @@ class UAMHandoverSimulation:
             "handover_attempts": 0,
             "radio_handover_successes": 0,
             "radio_handover_failures": 0,
+            "radio_failures_low_throughput": 0,
             "service_continuity_successes": 0,
             "service_continuity_failures": 0,
+            "service_failures_radio_only": 0,
+            "service_failures_latency_only": 0,
+            "service_failures_dual": 0,
             "ping_pong_events": 0,
             "control_latency_violations": 0,
             "precache_hits": 0,
+            "precache_requests": 0,
+            "precache_commits": 0,
+            "precache_backhaul_mb": 0.0,
+            "precache_ttl_expiries": 0,
+            "precache_reclaims": 0,
+            "reservation_collisions": 0,
+            "control_slice_exhaustions": 0,
+            "edge_cache_overflows": 0,
+            "peak_active_precache_entries": 0,
+            "peak_edge_cache_usage_mb": 0.0,
+            "throughput_demand_met_samples": 0,
+            "throughput_demand_unmet_samples": 0,
         }
         self._measurement_cache: Dict[Tuple[float, float, float], Tuple[int, Dict[int, Dict[str, float]]]] = {}
-        self._shadowing_cache: Dict[Tuple[int, int, int], float] = {}
+        self._shadowing_cache: Dict[Tuple[int, int, int, int, int], float] = {}
+        self._channel_state_cache: Dict[Tuple[int, int, int, int], bool] = {}
+        self._precache_entries: Dict[int, PrecacheEntry] = {}
 
         self.vertiports = self._build_reference_vertiports()
         self.active_vertiport_ids = self._active_vertiport_ids()
@@ -460,6 +564,14 @@ class UAMHandoverSimulation:
         )
         speed_kmh = self.random.triangular(*self.cfg.speed_range_kmh)
         altitude_m = self.random.choice(self.cfg.altitude_bands_m)
+        climb_distance_km = max(
+            self.cfg.vertical_transition_trigger_km,
+            speed_kmh * (self.cfg.takeoff_transition_altitude_m / max(self.cfg.takeoff_vertical_rate_mps, 1e-6)) / 3600.0,
+        )
+        descent_distance_km = max(
+            self.cfg.vertical_transition_trigger_km,
+            speed_kmh * (self.cfg.takeoff_transition_altitude_m / max(self.cfg.landing_vertical_rate_mps, 1e-6)) / 3600.0,
+        )
 
         flight = Flight(
             fid=self._next_flight_id,
@@ -468,11 +580,18 @@ class UAMHandoverSimulation:
             waypoints=waypoints,
             route_length_km=route_length_km,
             speed_kmh=speed_kmh,
+            cruise_altitude_m=altitude_m,
             altitude_m=altitude_m,
             service=SERVICE_PROFILES[service_name],
             x_km=waypoints[0][0],
             y_km=waypoints[0][1],
+            climb_distance_km=min(route_length_km / 2.0, climb_distance_km),
+            descent_distance_km=min(route_length_km / 2.0, descent_distance_km),
+            takeoff_altitude_m=0.0,
+            distance_to_destination_km=route_length_km,
         )
+        flight.altitude_m = flight.takeoff_altitude_m
+        flight.vertical_phase = "climb"
 
         initial_bs, _ = self._best_bs_for_position(
             flight.x_km,
@@ -514,10 +633,11 @@ class UAMHandoverSimulation:
         return origin, destination
 
     def step(self, policy: str = "reactive") -> None:
-        if policy not in {"reactive", "proactive"}:
+        if policy not in {"reactive", "a3_ttt", "proactive"}:
             raise ValueError(f"Unsupported policy: {policy}")
 
         self.current_time_s += self.cfg.time_step_s
+        self._expire_precache_entries()
         self._refresh_bs_loads()
         self._measurement_cache.clear()
 
@@ -528,14 +648,19 @@ class UAMHandoverSimulation:
             self._advance_flight(flight, self.cfg.time_step_s)
             if not flight.active:
                 self._detach_flight_from_bs(flight)
+                self._reclaim_precache_entry(flight.fid)
                 continue
 
             if policy == "reactive":
                 self._reactive_handover(flight)
+            elif policy == "a3_ttt":
+                self._a3_ttt_handover(flight)
             else:
                 self._proactive_handover(flight)
 
             self._sample_link_quality(flight)
+
+        self._recompute_precache_peaks()
 
     def run(self, duration_s: float, policy: str = "reactive") -> Dict[str, float]:
         steps = int(duration_s / self.cfg.time_step_s)
@@ -545,23 +670,37 @@ class UAMHandoverSimulation:
 
     def summarize(self, policy: str) -> Dict[str, float]:
         throughput_samples = []
+        throughput_gap_samples = []
         sinr_samples = []
         interruption_ms = 0.0
         completed = 0
         total_handovers = 0
+        demand_met_samples = 0
+        demand_total_samples = 0
 
         for flight in self.flights.values():
             throughput_samples.extend(flight.throughput_samples)
+            throughput_gap_samples.extend(flight.throughput_gap_samples)
             sinr_samples.extend(flight.sinr_samples)
             interruption_ms += flight.interruption_ms_total
             total_handovers += flight.handover_count
+            demand_met_samples += flight.demand_met_samples
+            demand_total_samples += flight.demand_met_samples + flight.demand_unmet_samples
             if not flight.active:
                 completed += 1
 
         mean_throughput = (
             float(np.mean(throughput_samples)) if throughput_samples else 0.0
         )
+        mean_throughput_gap = (
+            float(np.mean(throughput_gap_samples)) if throughput_gap_samples else 0.0
+        )
         mean_sinr = float(np.mean(sinr_samples)) if sinr_samples else 0.0
+        demand_satisfied_sample_pct = (
+            (demand_met_samples / demand_total_samples) * 100.0
+            if demand_total_samples
+            else 0.0
+        )
 
         return {
             "policy": policy,
@@ -572,12 +711,28 @@ class UAMHandoverSimulation:
             "handover_attempts": self.metrics["handover_attempts"],
             "radio_handover_successes": self.metrics["radio_handover_successes"],
             "radio_handover_failures": self.metrics["radio_handover_failures"],
+            "radio_failures_low_throughput": self.metrics["radio_failures_low_throughput"],
             "service_continuity_successes": self.metrics["service_continuity_successes"],
             "service_continuity_failures": self.metrics["service_continuity_failures"],
+            "service_failures_radio_only": self.metrics["service_failures_radio_only"],
+            "service_failures_latency_only": self.metrics["service_failures_latency_only"],
+            "service_failures_dual": self.metrics["service_failures_dual"],
             "ping_pong_events": self.metrics["ping_pong_events"],
             "control_latency_violations": self.metrics["control_latency_violations"],
             "precache_hits": self.metrics["precache_hits"],
+            "precache_requests": self.metrics["precache_requests"],
+            "precache_commits": self.metrics["precache_commits"],
+            "precache_backhaul_mb": round(float(self.metrics["precache_backhaul_mb"]), 2),
+            "precache_ttl_expiries": self.metrics["precache_ttl_expiries"],
+            "precache_reclaims": self.metrics["precache_reclaims"],
+            "reservation_collisions": self.metrics["reservation_collisions"],
+            "control_slice_exhaustions": self.metrics["control_slice_exhaustions"],
+            "edge_cache_overflows": self.metrics["edge_cache_overflows"],
+            "peak_active_precache_entries": self.metrics["peak_active_precache_entries"],
+            "peak_edge_cache_usage_mb": round(float(self.metrics["peak_edge_cache_usage_mb"]), 2),
             "mean_throughput_mbps": round(mean_throughput, 2),
+            "mean_throughput_gap_mbps": round(mean_throughput_gap, 2),
+            "demand_satisfied_sample_pct": round(demand_satisfied_sample_pct, 2),
             "mean_sinr_db": round(mean_sinr, 2),
             "total_interruption_ms": round(interruption_ms, 2),
         }
@@ -592,13 +747,48 @@ class UAMHandoverSimulation:
                 ratio = move_km / max(remaining_segment_km, 1e-9)
                 flight.x_km = start[0] + (end[0] - start[0]) * ratio
                 flight.y_km = start[1] + (end[1] - start[1]) * ratio
+                flight.total_distance_travelled_km += move_km
                 move_km = 0.0
             else:
                 flight.x_km, flight.y_km = end
                 move_km -= remaining_segment_km
+                flight.total_distance_travelled_km += remaining_segment_km
                 flight.segment_index += 1
                 if flight.segment_index >= len(flight.waypoints) - 1:
                     flight.active = False
+
+        flight.distance_to_destination_km = max(
+            0.0,
+            flight.route_length_km - flight.total_distance_travelled_km,
+        )
+        self._update_flight_altitude(flight)
+
+    def _update_flight_altitude(self, flight: Flight) -> None:
+        if not flight.active:
+            flight.altitude_m = 0.0
+            flight.vertical_phase = "landed"
+            return
+
+        if flight.total_distance_travelled_km < flight.climb_distance_km:
+            climb_ratio = flight.total_distance_travelled_km / max(flight.climb_distance_km, 1e-9)
+            flight.altitude_m = (
+                flight.takeoff_altitude_m
+                + (flight.cruise_altitude_m - flight.takeoff_altitude_m) * climb_ratio
+            )
+            flight.vertical_phase = "climb"
+            return
+
+        if flight.distance_to_destination_km <= flight.descent_distance_km:
+            descent_ratio = flight.distance_to_destination_km / max(flight.descent_distance_km, 1e-9)
+            flight.altitude_m = max(
+                flight.takeoff_altitude_m,
+                flight.cruise_altitude_m * descent_ratio,
+            )
+            flight.vertical_phase = "descent"
+            return
+
+        flight.altitude_m = flight.cruise_altitude_m
+        flight.vertical_phase = "cruise"
 
     def _refresh_bs_loads(self) -> None:
         for bs in self.base_stations.values():
@@ -606,6 +796,116 @@ class UAMHandoverSimulation:
         for flight in self.flights.values():
             if flight.active and flight.current_bs is not None:
                 self.base_stations[flight.current_bs].connected_flights.add(flight.fid)
+
+    def _recompute_precache_peaks(self) -> None:
+        active_entries = len(self._precache_entries)
+        total_cache_mb = sum(entry.cache_size_mb for entry in self._precache_entries.values())
+        self.metrics["peak_active_precache_entries"] = max(
+            self.metrics["peak_active_precache_entries"],
+            active_entries,
+        )
+        self.metrics["peak_edge_cache_usage_mb"] = max(
+            self.metrics["peak_edge_cache_usage_mb"],
+            total_cache_mb,
+        )
+
+    def _expire_precache_entries(self) -> None:
+        expired_flights = [
+            flight_id
+            for flight_id, entry in self._precache_entries.items()
+            if entry.expire_at_s <= self.current_time_s
+        ]
+        for flight_id in expired_flights:
+            flight = self.flights.get(flight_id)
+            if flight is not None:
+                flight.precache_ttl_expiries += 1
+            self.metrics["precache_ttl_expiries"] += 1
+            self._reclaim_precache_entry(flight_id)
+
+    def _reclaim_precache_entry(self, flight_id: int) -> None:
+        entry = self._precache_entries.pop(flight_id, None)
+        if entry is None:
+            return
+        self.metrics["precache_reclaims"] += 1
+        flight = self.flights.get(flight_id)
+        if flight is not None:
+            flight.precache_reclaims += 1
+
+    def _reserved_control_usage_mbps(self, target_bs: int) -> float:
+        return sum(
+            entry.reserved_control_mbps
+            for entry in self._precache_entries.values()
+            if entry.target_bs == target_bs
+        )
+
+    def _cache_usage_mb(self, target_bs: int) -> float:
+        return sum(
+            entry.cache_size_mb
+            for entry in self._precache_entries.values()
+            if entry.target_bs == target_bs
+        )
+
+    def _estimate_precache_payload_mb(self, flight: Flight) -> float:
+        payload_window_s = min(self.cfg.precache_ttl_s, 8.0)
+        capped_rate_mbps = min(flight.service.demand_mbps, 12.0)
+        return max(0.5, capped_rate_mbps * payload_window_s / 8.0)
+
+    def _prepare_precache(self, flight: Flight, target_bs: int) -> bool:
+        if flight.fid in self._precache_entries:
+            existing_entry = self._precache_entries[flight.fid]
+            if existing_entry.target_bs == target_bs:
+                flight.reserved_target_bs = target_bs
+                flight.precache_ready_at_s = existing_entry.ready_at_s
+                return True
+            self._reclaim_precache_entry(flight.fid)
+
+        flight.precache_requests += 1
+        self.metrics["precache_requests"] += 1
+
+        reserved_control_mbps = min(
+            self.cfg.reserved_control_slice_mbps,
+            max(self.cfg.precache_control_reservation_mbps, flight.service.handover_floor_mbps),
+        )
+        if (
+            self._reserved_control_usage_mbps(target_bs) + reserved_control_mbps
+            > self.cfg.reserved_control_slice_mbps
+        ):
+            self.metrics["reservation_collisions"] += 1
+            self.metrics["control_slice_exhaustions"] += 1
+            flight.reservation_collisions += 1
+            flight.control_slice_exhaustions += 1
+            flight.reserved_target_bs = None
+            flight.precache_ready_at_s = math.inf
+            return False
+
+        cache_size_mb = self._estimate_precache_payload_mb(flight)
+        if self._cache_usage_mb(target_bs) + cache_size_mb > self.cfg.edge_cache_capacity_mb:
+            self.metrics["edge_cache_overflows"] += 1
+            self.metrics["reservation_collisions"] += 1
+            flight.edge_cache_overflows += 1
+            flight.reservation_collisions += 1
+            flight.reserved_target_bs = None
+            flight.precache_ready_at_s = math.inf
+            return False
+
+        entry = PrecacheEntry(
+            flight_id=flight.fid,
+            target_bs=target_bs,
+            cache_size_mb=cache_size_mb,
+            reserved_control_mbps=reserved_control_mbps,
+            created_at_s=self.current_time_s,
+            ready_at_s=self.current_time_s + self.cfg.precache_lead_time_s,
+            expire_at_s=self.current_time_s + self.cfg.precache_ttl_s,
+        )
+        self._precache_entries[flight.fid] = entry
+        self.metrics["precache_commits"] += 1
+        self.metrics["precache_backhaul_mb"] += cache_size_mb
+        flight.precache_commits += 1
+        flight.precache_backhaul_mb += cache_size_mb
+        flight.reserved_target_bs = target_bs
+        flight.precache_ready_at_s = entry.ready_at_s
+        self._recompute_precache_peaks()
+        return True
 
     def _best_bs_for_position(
         self,
@@ -648,6 +948,11 @@ class UAMHandoverSimulation:
                 "sinr_db": effective_sinr_db,
                 "throughput_mbps": throughput_mbps,
                 "latency_ms": latency_ms,
+                "los_probability": self._aerial_los_probability(
+                    _distance_km((x_km, y_km), (bs.x_km, bs.y_km)) * 1000.0,
+                    altitude_m,
+                ),
+                "is_los": 1.0 if self._is_los_condition(x_km, y_km, altitude_m, bs) else 0.0,
             }
 
         best_bid = max(measurements, key=lambda bid: measurements[bid]["sinr_db"])
@@ -671,23 +976,139 @@ class UAMHandoverSimulation:
             self.cfg.carrier_freq_ghz * 1000.0
         )
 
-        # Modeling assumption:
-        # Aerial UEs are penalized because terrestrial BSs are downtilted.
-        downtilt_penalty_db = 6.0 if altitude_m >= 450.0 else 4.0
+        is_los = self._is_los_condition(x_km, y_km, altitude_m, bs)
+        downtilt_penalty_db = self._downtilt_penalty_db(horizontal_m, altitude_m)
+        excess_loss_db = self._excess_loss_db(altitude_m, is_los)
+        shadowing_db = self._shadowing_db(x_km, y_km, altitude_m, bs, is_los)
+        fading_db = self._small_scale_fading_db(x_km, y_km, altitude_m, bs, is_los)
+        return (
+            self.cfg.tx_power_dbm
+            - fspl_db
+            - downtilt_penalty_db
+            - excess_loss_db
+            + shadowing_db
+            + fading_db
+        )
+
+    def _mix_seed(self, *values: int) -> int:
+        mixed = self.cfg.seed * 1000003
+        for idx, value in enumerate(values, start=1):
+            mixed = (mixed * 9176 + value * (131071 + idx * 104729)) & 0xFFFFFFFF
+        return mixed
+
+    def _channel_tile_key(
+        self,
+        x_km: float,
+        y_km: float,
+        altitude_m: float,
+    ) -> Tuple[int, int, int]:
         tile = self.cfg.shadowing_tile_km
         tile_x = int(x_km / tile)
         tile_y = int(y_km / tile)
-        shadow_key = (bs.bid, tile_x, tile_y)
+        altitude_bucket = int(altitude_m / 50.0)
+        return tile_x, tile_y, altitude_bucket
+
+    def _aerial_los_probability(self, horizontal_m: float, altitude_m: float) -> float:
+        # TR 36.777 and the 3GPP UAV work emphasize that aerial UEs above
+        # rooftops are frequently LoS-dominant and observe multiple strong
+        # neighbors. ITU-R P.1410-5 also separates LoS, reflected-wave
+        # dominant, and diffracted-wave dominant regions around rooftops.
+        rooftop_delta_m = altitude_m - self.cfg.rooftop_height_m
+        if rooftop_delta_m >= 250.0:
+            base_probability = 0.98
+        elif rooftop_delta_m >= 100.0:
+            base_probability = 0.93
+        elif rooftop_delta_m >= 0.0:
+            base_probability = 0.83
+        else:
+            base_probability = 0.65
+
+        distance_penalty = min(0.28, horizontal_m / 5000.0 * 0.28)
+        below_rooftop_penalty = 0.10 if altitude_m < self.cfg.rooftop_height_m else 0.0
+        probability = base_probability - distance_penalty - below_rooftop_penalty
+        return max(0.20, min(0.98, probability))
+
+    def _is_los_condition(
+        self,
+        x_km: float,
+        y_km: float,
+        altitude_m: float,
+        bs: BaseStation,
+    ) -> bool:
+        tile_x, tile_y, altitude_bucket = self._channel_tile_key(x_km, y_km, altitude_m)
+        state_key = (bs.bid, tile_x, tile_y, altitude_bucket)
+        if state_key not in self._channel_state_cache:
+            horizontal_m = _distance_km((x_km, y_km), (bs.x_km, bs.y_km)) * 1000.0
+            los_probability = self._aerial_los_probability(horizontal_m, altitude_m)
+            rng = random.Random(self._mix_seed(bs.bid, tile_x, tile_y, altitude_bucket, 17))
+            self._channel_state_cache[state_key] = rng.random() < los_probability
+        return self._channel_state_cache[state_key]
+
+    def _downtilt_penalty_db(self, horizontal_m: float, altitude_m: float) -> float:
+        if altitude_m < self.cfg.rooftop_height_m + 50.0:
+            penalty_db = 3.0
+        elif altitude_m < self.cfg.rooftop_height_m + 200.0:
+            penalty_db = 5.0
+        else:
+            penalty_db = 7.0
+        if horizontal_m >= 3000.0:
+            penalty_db += 1.0
+        return penalty_db
+
+    def _excess_loss_db(self, altitude_m: float, is_los: bool) -> float:
+        if is_los:
+            return 0.0
+        shadow_depth_m = max(0.0, self.cfg.rooftop_height_m - altitude_m)
+        return self.cfg.nlos_excess_loss_db + 0.03 * shadow_depth_m
+
+    def _shadowing_db(
+        self,
+        x_km: float,
+        y_km: float,
+        altitude_m: float,
+        bs: BaseStation,
+        is_los: bool,
+    ) -> float:
+        tile_x, tile_y, altitude_bucket = self._channel_tile_key(x_km, y_km, altitude_m)
+        shadow_key = (bs.bid, tile_x, tile_y, altitude_bucket, int(is_los))
         if shadow_key not in self._shadowing_cache:
-            mixed_seed = (
-                self.cfg.seed * 1000003
-                + bs.bid * 9176
-                + tile_x * 131071
-                + tile_y * 524287
-            ) & 0xFFFFFFFF
-            self._shadowing_cache[shadow_key] = random.Random(mixed_seed).gauss(0.0, 2.0)
-        shadowing_db = self._shadowing_cache[shadow_key]
-        return self.cfg.tx_power_dbm - fspl_db - downtilt_penalty_db + shadowing_db
+            sigma_db = (
+                self.cfg.los_shadowing_std_db
+                if is_los
+                else self.cfg.nlos_shadowing_std_db
+            )
+            mixed_seed = self._mix_seed(bs.bid, tile_x, tile_y, altitude_bucket, int(is_los), 29)
+            self._shadowing_cache[shadow_key] = random.Random(mixed_seed).gauss(0.0, sigma_db)
+        return self._shadowing_cache[shadow_key]
+
+    def _small_scale_fading_db(
+        self,
+        x_km: float,
+        y_km: float,
+        altitude_m: float,
+        bs: BaseStation,
+        is_los: bool,
+    ) -> float:
+        tile_x, tile_y, altitude_bucket = self._channel_tile_key(x_km, y_km, altitude_m)
+        time_slot = int(self.current_time_s / max(self.cfg.time_step_s, 1e-9))
+        rng = random.Random(
+            self._mix_seed(bs.bid, tile_x, tile_y, altitude_bucket, time_slot, int(is_los), 43)
+        )
+
+        if is_los:
+            k_linear = 10.0 ** (self.cfg.rician_k_db / 10.0)
+            scatter_scale = math.sqrt(1.0 / (2.0 * (k_linear + 1.0)))
+            los_component = math.sqrt(k_linear / (k_linear + 1.0))
+            i_value = los_component + scatter_scale * rng.gauss(0.0, 1.0)
+            q_value = scatter_scale * rng.gauss(0.0, 1.0)
+            amplitude = math.sqrt(i_value * i_value + q_value * q_value)
+        else:
+            i_value = rng.gauss(0.0, 1.0 / math.sqrt(2.0))
+            q_value = rng.gauss(0.0, 1.0 / math.sqrt(2.0))
+            amplitude = math.sqrt(i_value * i_value + q_value * q_value)
+
+        fading_db = 20.0 * math.log10(max(amplitude, 1e-6))
+        return max(-12.0, min(6.0, fading_db))
 
     def _detach_flight_from_bs(self, flight: Flight) -> None:
         if flight.current_bs is not None:
@@ -724,6 +1145,47 @@ class UAMHandoverSimulation:
                 precache_hit=False,
             )
 
+    def _a3_ttt_handover(self, flight: Flight) -> None:
+        if (
+            self.current_time_s - flight.last_handover_time_s
+            < self.cfg.handover_hysteresis_s
+        ):
+            return
+
+        best_bs, measurements = self._best_bs_for_position(
+            flight.x_km, flight.y_km, flight.altitude_m
+        )
+        current = measurements[flight.current_bs]
+        best = measurements[best_bs]
+
+        a3_condition = (
+            best_bs != flight.current_bs
+            and best["sinr_db"] > current["sinr_db"] + self.cfg.a3_margin_db
+        )
+
+        if a3_condition:
+            if flight.a3_candidate_bs != best_bs:
+                flight.a3_candidate_bs = best_bs
+                flight.a3_candidate_since_s = self.current_time_s
+                return
+
+            dwell_time = self.current_time_s - flight.a3_candidate_since_s
+            if dwell_time >= self.cfg.a3_ttt_s or current["sinr_db"] < self.cfg.min_operational_sinr_db:
+                interruption_ms = 42.0 + max(0.0, 4.5 - best["sinr_db"]) * 4.0
+                self._execute_handover(
+                    flight,
+                    target_bs=best_bs,
+                    interruption_ms=interruption_ms,
+                    target_metrics=best,
+                    precache_hit=False,
+                )
+                flight.a3_candidate_bs = None
+                flight.a3_candidate_since_s = math.inf
+            return
+
+        flight.a3_candidate_bs = None
+        flight.a3_candidate_since_s = math.inf
+
     def _proactive_handover(self, flight: Flight) -> None:
         if (
             self.current_time_s - flight.last_handover_time_s
@@ -741,7 +1203,7 @@ class UAMHandoverSimulation:
             self.cfg.proactive_trigger_window_s,
         )
         best_future_bs, future_measurements = self._best_bs_for_position(
-            future_pos[0], future_pos[1], flight.altitude_m
+            future_pos[0], future_pos[1], future_pos[2]
         )
         future_current = future_measurements.get(
             flight.current_bs,
@@ -756,19 +1218,11 @@ class UAMHandoverSimulation:
         )
 
         if should_prepare:
-            if flight.reserved_target_bs is None:
-                flight.reserved_target_bs = best_future_bs
-                flight.precache_ready_at_s = (
-                    self.current_time_s + self.cfg.precache_lead_time_s
-                )
-            elif (
-                flight.reserved_target_bs != best_future_bs
-                and self.current_time_s >= flight.precache_ready_at_s
-            ):
-                flight.reserved_target_bs = best_future_bs
-                flight.precache_ready_at_s = (
-                    self.current_time_s + self.cfg.precache_lead_time_s
-                )
+            self._prepare_precache(flight, best_future_bs)
+        elif flight.reserved_target_bs is not None:
+            self._reclaim_precache_entry(flight.fid)
+            flight.reserved_target_bs = None
+            flight.precache_ready_at_s = math.inf
 
         if flight.reserved_target_bs is None:
             return
@@ -798,6 +1252,28 @@ class UAMHandoverSimulation:
             )
             flight.reserved_target_bs = None
             flight.precache_ready_at_s = math.inf
+            flight.a3_candidate_bs = None
+            flight.a3_candidate_since_s = math.inf
+
+    def _evaluate_handover_outcome(
+        self,
+        flight: Flight,
+        interruption_ms: float,
+        target_metrics: Dict[str, float],
+    ) -> HandoverOutcome:
+        observed_throughput_mbps = float(target_metrics["throughput_mbps"])
+        required_floor_mbps = float(flight.service.handover_floor_mbps)
+        latency_budget_ms = float(flight.service.latency_budget_ms)
+        meets_handover_floor = observed_throughput_mbps >= required_floor_mbps
+        meets_latency_budget = interruption_ms <= latency_budget_ms
+        return HandoverOutcome(
+            observed_throughput_mbps=observed_throughput_mbps,
+            required_floor_mbps=required_floor_mbps,
+            interruption_ms=interruption_ms,
+            latency_budget_ms=latency_budget_ms,
+            meets_handover_floor=meets_handover_floor,
+            meets_latency_budget=meets_latency_budget,
+        )
 
     def _execute_handover(
         self,
@@ -817,20 +1293,22 @@ class UAMHandoverSimulation:
         if precache_hit:
             self.metrics["precache_hits"] += 1
 
-        latency_budget_ms = flight.service.latency_budget_ms
-        radio_success = (
-            target_metrics["throughput_mbps"] >= flight.service.handover_floor_mbps
+        outcome = self._evaluate_handover_outcome(
+            flight=flight,
+            interruption_ms=interruption_ms,
+            target_metrics=target_metrics,
         )
-        service_success = radio_success and interruption_ms <= latency_budget_ms
 
-        if radio_success:
+        if outcome.radio_success:
             self.metrics["radio_handover_successes"] += 1
             flight.radio_handover_successes += 1
         else:
             self.metrics["radio_handover_failures"] += 1
+            self.metrics["radio_failures_low_throughput"] += 1
             flight.radio_handover_failures += 1
+            flight.radio_failures_low_throughput += 1
 
-        if service_success:
+        if outcome.service_success:
             self.metrics["service_continuity_successes"] += 1
             flight.service_continuity_successes += 1
         else:
@@ -838,6 +1316,15 @@ class UAMHandoverSimulation:
             flight.service_continuity_failures += 1
             self.metrics["control_latency_violations"] += 1
             flight.latency_violations += 1
+            if outcome.service_failure_radio_only:
+                self.metrics["service_failures_radio_only"] += 1
+                flight.service_failures_radio_only += 1
+            elif outcome.service_failure_latency_only:
+                self.metrics["service_failures_latency_only"] += 1
+                flight.service_failures_latency_only += 1
+            elif outcome.service_failure_dual:
+                self.metrics["service_failures_dual"] += 1
+                flight.service_failures_dual += 1
 
         if flight.handover_history:
             prev_time_s, prev_bs = flight.handover_history[-1]
@@ -853,16 +1340,18 @@ class UAMHandoverSimulation:
         flight.last_handover_time_s = self.current_time_s
         if precache_hit:
             flight.precache_hits += 1
+            self._reclaim_precache_entry(flight.fid)
 
     def _predict_future_position(
         self,
         flight: Flight,
         horizon_s: float,
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float, float]:
         temp_segment = flight.segment_index
         temp_x = flight.x_km
         temp_y = flight.y_km
         move_km = flight.speed_kmh * (horizon_s / 3600.0)
+        temp_distance = flight.total_distance_travelled_km
 
         while move_km > 0 and temp_segment < len(flight.waypoints) - 1:
             start = (temp_x, temp_y)
@@ -872,23 +1361,47 @@ class UAMHandoverSimulation:
                 ratio = move_km / max(remaining_segment_km, 1e-9)
                 temp_x = start[0] + (end[0] - start[0]) * ratio
                 temp_y = start[1] + (end[1] - start[1]) * ratio
+                temp_distance += move_km
                 break
             temp_x, temp_y = end
             move_km -= remaining_segment_km
+            temp_distance += remaining_segment_km
             temp_segment += 1
 
-        return temp_x, temp_y
+        remaining_distance = max(0.0, flight.route_length_km - temp_distance)
+        if temp_distance < flight.climb_distance_km:
+            climb_ratio = temp_distance / max(flight.climb_distance_km, 1e-9)
+            temp_altitude = (
+                flight.takeoff_altitude_m
+                + (flight.cruise_altitude_m - flight.takeoff_altitude_m) * climb_ratio
+            )
+        elif remaining_distance <= flight.descent_distance_km:
+            descent_ratio = remaining_distance / max(flight.descent_distance_km, 1e-9)
+            temp_altitude = max(flight.takeoff_altitude_m, flight.cruise_altitude_m * descent_ratio)
+        else:
+            temp_altitude = flight.cruise_altitude_m
+
+        return temp_x, temp_y, temp_altitude
 
     def _sample_link_quality(self, flight: Flight) -> None:
         _, measurements = self._best_bs_for_position(
             flight.x_km, flight.y_km, flight.altitude_m
         )
         current_metrics = measurements[flight.current_bs]
+        offered_throughput = current_metrics["throughput_mbps"]
         effective_throughput = min(
-            current_metrics["throughput_mbps"], flight.service.demand_mbps
+            offered_throughput, flight.service.demand_mbps
         )
+        throughput_gap = max(0.0, flight.service.demand_mbps - offered_throughput)
         flight.throughput_samples.append(effective_throughput)
+        flight.throughput_gap_samples.append(throughput_gap)
         flight.sinr_samples.append(current_metrics["sinr_db"])
+        if offered_throughput >= flight.service.demand_mbps:
+            self.metrics["throughput_demand_met_samples"] += 1
+            flight.demand_met_samples += 1
+        else:
+            self.metrics["throughput_demand_unmet_samples"] += 1
+            flight.demand_unmet_samples += 1
         if current_metrics["latency_ms"] > flight.service.latency_budget_ms:
             self.metrics["control_latency_violations"] += 1
             flight.latency_violations += 1
@@ -898,6 +1411,17 @@ class UAMHandoverSimulation:
         for flight in self.flights.values():
             mean_throughput = (
                 float(np.mean(flight.throughput_samples)) if flight.throughput_samples else 0.0
+            )
+            mean_throughput_gap = (
+                float(np.mean(flight.throughput_gap_samples))
+                if flight.throughput_gap_samples
+                else 0.0
+            )
+            demand_sample_total = flight.demand_met_samples + flight.demand_unmet_samples
+            demand_satisfied_sample_pct = (
+                (flight.demand_met_samples / demand_sample_total) * 100.0
+                if demand_sample_total
+                else 0.0
             )
             mean_sinr = (
                 float(np.mean(flight.sinr_samples)) if flight.sinr_samples else 0.0
@@ -911,6 +1435,9 @@ class UAMHandoverSimulation:
                 "route_length_km": round(flight.route_length_km, 2),
                 "speed_kmh": round(flight.speed_kmh, 2),
                 "altitude_m": round(flight.altitude_m, 1),
+                "cruise_altitude_m": round(flight.cruise_altitude_m, 1),
+                "vertical_phase": flight.vertical_phase,
+                "distance_to_destination_km": round(flight.distance_to_destination_km, 3),
                 "service": flight.service.name,
                 "handover_count": flight.handover_count,
                 "radio_handover_successes": flight.radio_handover_successes,
@@ -919,8 +1446,26 @@ class UAMHandoverSimulation:
                 "service_continuity_failures": flight.service_continuity_failures,
                 "ping_pong_events": flight.ping_pong_events,
                 "precache_hits": flight.precache_hits,
+                "precache_requests": flight.precache_requests,
+                "precache_commits": flight.precache_commits,
+                "precache_backhaul_mb": round(flight.precache_backhaul_mb, 2),
+                "precache_ttl_expiries": flight.precache_ttl_expiries,
+                "precache_reclaims": flight.precache_reclaims,
+                "reservation_collisions": flight.reservation_collisions,
+                "control_slice_exhaustions": flight.control_slice_exhaustions,
+                "edge_cache_overflows": flight.edge_cache_overflows,
+                "radio_failures_low_throughput": flight.radio_failures_low_throughput,
+                "service_failures_radio_only": flight.service_failures_radio_only,
+                "service_failures_latency_only": flight.service_failures_latency_only,
+                "service_failures_dual": flight.service_failures_dual,
                 "latency_violations": flight.latency_violations,
                 "mean_throughput_mbps": round(mean_throughput, 2),
+                "mean_throughput_gap_mbps": round(mean_throughput_gap, 2),
+                "throughput_to_demand_pct": round(
+                    (mean_throughput / flight.service.demand_mbps) * 100.0,
+                    2,
+                ),
+                "demand_satisfied_sample_pct": round(demand_satisfied_sample_pct, 2),
                 "mean_sinr_db": round(mean_sinr, 2),
                 "total_interruption_ms": round(flight.interruption_ms_total, 2),
                 "completed": int(not flight.active),
@@ -939,12 +1484,28 @@ def format_summary(summary: Dict[str, float]) -> str:
         "handover_attempts",
         "radio_handover_successes",
         "radio_handover_failures",
+        "radio_failures_low_throughput",
         "service_continuity_successes",
         "service_continuity_failures",
+        "service_failures_radio_only",
+        "service_failures_latency_only",
+        "service_failures_dual",
         "ping_pong_events",
         "control_latency_violations",
         "precache_hits",
+        "precache_requests",
+        "precache_commits",
+        "precache_backhaul_mb",
+        "precache_ttl_expiries",
+        "precache_reclaims",
+        "reservation_collisions",
+        "control_slice_exhaustions",
+        "edge_cache_overflows",
+        "peak_active_precache_entries",
+        "peak_edge_cache_usage_mb",
         "mean_throughput_mbps",
+        "mean_throughput_gap_mbps",
+        "demand_satisfied_sample_pct",
         "mean_sinr_db",
         "total_interruption_ms",
     ]

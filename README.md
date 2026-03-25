@@ -29,6 +29,11 @@
 - 데이터 해석 지침: [`/Users/apple/Desktop/논문/docs/guides/DataRead.md`](/Users/apple/Desktop/논문/docs/guides/DataRead.md)
 - 관련 의견 메모: [`/Users/apple/Desktop/논문/docs/guides/DataRead_opinion.txt`](/Users/apple/Desktop/논문/docs/guides/DataRead_opinion.txt)
 - 시뮬레이션 시나리오 설명: [`/Users/apple/Desktop/논문/docs/guides/simulation_scenario.md`](/Users/apple/Desktop/논문/docs/guides/simulation_scenario.md)
+- seed 확대 실행 가이드: [`/Users/apple/Desktop/논문/docs/guides/Seed_Expansion_Execution_Guide.md`](/Users/apple/Desktop/논문/docs/guides/Seed_Expansion_Execution_Guide.md)
+- 최종 실행 가이드: [`/Users/apple/Desktop/논문/docs/guides/Final_Simulation_Execution_Guide.md`](/Users/apple/Desktop/논문/docs/guides/Final_Simulation_Execution_Guide.md)
+- 채널 모델 정비 메모: [`/Users/apple/Desktop/논문/docs/guides/Channel_Model_Update.md`](/Users/apple/Desktop/논문/docs/guides/Channel_Model_Update.md)
+- contention 및 precaching 비용 메모: [`/Users/apple/Desktop/논문/docs/guides/Contention_Precaching_Update.md`](/Users/apple/Desktop/논문/docs/guides/Contention_Precaching_Update.md)
+- 최종 반영 보고서: [`/Users/apple/Desktop/논문/docs/guides/Updata_Final_Report.txt`](/Users/apple/Desktop/논문/docs/guides/Updata_Final_Report.txt)
 - 참조 논문 PDF: [`/Users/apple/Desktop/논문/docs/references/related_works`](/Users/apple/Desktop/논문/docs/references/related_works)
 - 문체 예시: [`/Users/apple/Desktop/논문/docs/references/examples`](/Users/apple/Desktop/논문/docs/references/examples)
 - 초안 논문: [`/Users/apple/Desktop/논문/manuscript/drafts/UAM_Intro_Draft.txt`](/Users/apple/Desktop/논문/manuscript/drafts/UAM_Intro_Draft.txt)
@@ -47,6 +52,8 @@
 
 1. 전체 시뮬레이션
 
+권장 명령과 해석 순서는 [`/Users/apple/Desktop/논문/docs/guides/Final_Simulation_Execution_Guide.md`](/Users/apple/Desktop/논문/docs/guides/Final_Simulation_Execution_Guide.md)를 우선 참조한다.
+
 ```bash
 python3 /Users/apple/Desktop/논문/scripts/run_simulation_sweep.py
 ```
@@ -54,7 +61,9 @@ python3 /Users/apple/Desktop/논문/scripts/run_simulation_sweep.py
 2. CSV 분석
 
 ```bash
-python3 /Users/apple/Desktop/논문/scripts/analyze_simulation_csv.py
+python3 /Users/apple/Desktop/논문/scripts/analyze_simulation_csv.py \
+  --run-csv /Users/apple/Desktop/논문/results/raw/simulation_sweep_run_results.csv \
+  --flight-csv /Users/apple/Desktop/논문/results/raw/simulation_sweep_flight_results.csv
 ```
 
 3. 논문용 표·그림 생성
@@ -76,3 +85,22 @@ python3 /Users/apple/Desktop/논문/scripts/build_submission_doc.py
 - `results/tables`, `results/figures/paper`: 최종 논문 산출물
 - `data/legacy`: 과거 실험 파일과 예전 그래프 보관
 - 루트에는 진입점 파일과 상위 디렉토리만 남긴다
+
+
+## 본실험 실행
+python3 /Users/apple/Desktop/논문/scripts/run_simulation_sweep.py \
+  --seed-spec 1-30 \
+  --policies reactive,a3_ttt,proactive \
+  --run-duration-s 1800 \
+  --traffic-hours 1.0 \
+  --output-prefix seed30_final
+
+python3 /Users/apple/Desktop/논문/scripts/analyze_simulation_csv.py \
+  --run-csv /Users/apple/Desktop/논문/results/raw/seed30_final_run_results.csv \
+  --flight-csv /Users/apple/Desktop/논문/results/raw/seed30_final_flight_results.csv
+
+## 우선 확인할 분석 파일
+/Users/apple/Desktop/논문/results/analysis/analysis_throughput_gap_breakdown.csv
+/Users/apple/Desktop/논문/results/analysis/analysis_service_continuity_breakdown.csv
+/Users/apple/Desktop/논문/results/analysis/analysis_handover_failure_rate.csv
+/Users/apple/Desktop/논문/results/analysis/analysis_latency_violation_deep.csv
